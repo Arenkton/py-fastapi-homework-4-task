@@ -1,5 +1,8 @@
+import os
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from typing import cast
+from uuid import uuid4
 
 from fastapi import (
     APIRouter,
@@ -41,6 +44,27 @@ from schemas import (
 from security.interfaces import JWTAuthManagerInterface
 
 router = APIRouter()
+
+
+def make_email_link(
+    request: Request,
+    endpoint: str,
+    **params: str,
+) -> str:
+    url = request.url_for(endpoint)
+
+    if params:
+        url = url.include_query_params(**params)
+
+    parsed = urlsplit(str(url))
+    base_url = os.getenv(
+        "PUBLIC_BASE_URL",
+        "http://127.0.0.1:8000",
+    ).rstrip("/")
+
+    query = f"?{parsed.query}" if parsed.query else ""
+
+    return f"{base_url}{parsed.path}{query}"
 
 
 @router.post(
@@ -118,7 +142,6 @@ async def register_user(
             detail="Default user group not found."
         )
 
-
     try:
         new_user = UserModel.create(
             email=str(user_data.email),
@@ -146,11 +169,11 @@ async def register_user(
             detail="An error occurred during user creation."
         ) from e
 
-    activation_link = str(
-        request.url_for("activate_account").include_query_params(
-            email=str(user_data.email),
-            token=activation_token_value,
-        )
+    activation_link = make_email_link(
+        request,
+        "activate_account",
+        email=str(user_data.email),
+        token=activation_token_value,
     )
 
     background_tasks.add_task(
@@ -193,7 +216,6 @@ async def register_user(
         },
     },
 )
-
 async def activate_account(
     activation_data: UserActivationRequestSchema,
     background_tasks: BackgroundTasks,
@@ -251,13 +273,10 @@ async def activate_account(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User account is already active."
         )
-
-
     user.is_active = True
     await db.delete(token_record)
     await db.commit()
-
-    login_link = str(request.url_for("login_user"))
+    login_link = make_email_link(request, "login_user")
 
     background_tasks.add_task(
         email_sender.send_activation_complete_email,
@@ -323,11 +342,11 @@ async def request_password_reset_token(
 
     await db.commit()
 
-    reset_link = str(
-        request.url_for("reset_password").include_query_params(
-            email=str(data.email),
-            token=reset_token_value,
-        )
+    reset_link = make_email_link(
+        request,
+        "reset_password",
+        email=str(data.email),
+        token=reset_token_value,
     )
 
     background_tasks.add_task(
@@ -453,10 +472,7 @@ async def reset_password(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred while resetting the password."
         )
-
-
-    login_link = str(request.url_for("login_user"))
-
+    login_link = make_email_link(request, "login_user")
     background_tasks.add_task(
         email_sender.send_password_reset_complete_email,
         str(data.email),
@@ -549,9 +565,12 @@ async def login_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is not activated.",
         )
-
-    jwt_refresh_token = jwt_manager.create_refresh_token({"user_id": user.id})
-
+    jwt_refresh_token = jwt_manager.create_refresh_token(
+        {
+            "user_id": user.id,
+            "jti": str(uuid4()),
+        }
+    )
     try:
         refresh_token = RefreshTokenModel.create(
             user_id=user.id,
